@@ -357,10 +357,18 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
       s.scrollAccum += e.deltaY * 0.006;
     };
 
+    // Touch start tracking for tap detection
+    let touchStart = { x: 0, y: 0 };
+
     const onTouchStart = (e: TouchEvent) => {
       e.preventDefault();
       s.lastTouches = Array.from(e.touches) as Touch[];
       s.lastTouchDist = getTouchDistance(s.lastTouches);
+
+      if (e.touches.length === 1) {
+        touchStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+      }
+
       setCursor("grabbing");
     };
 
@@ -387,6 +395,38 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
     };
 
     const onTouchEnd = (e: TouchEvent) => {
+      // Check for tap if it was a single touch that just ended
+      const changed = e.changedTouches[0];
+      if (changed && s.lastTouches.length <= 1) {
+        const dx = changed.clientX - touchStart.x;
+        const dy = changed.clientY - touchStart.y;
+
+        // Strict tap threshold
+        if (Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+          const rect = gl.domElement.getBoundingClientRect();
+          const x = changed.clientX - rect.left;
+          const y = changed.clientY - rect.top;
+
+          const mouse = new THREE.Vector2(
+            (x / rect.width) * 2 - 1,
+            -(y / rect.height) * 2 + 1
+          );
+
+          const raycaster = new THREE.Raycaster();
+          raycaster.setFromCamera(mouse, camera);
+
+          if (chunksGroupRef.current) {
+            const intersects = raycaster.intersectObjects(chunksGroupRef.current.children, true);
+            if (intersects.length > 0) {
+              const object = intersects[0].object;
+              if (object.userData && object.userData.url) {
+                window.open(object.userData.url, "_blank");
+              }
+            }
+          }
+        }
+      }
+
       s.lastTouches = Array.from(e.touches) as Touch[];
       s.lastTouchDist = getTouchDistance(s.lastTouches);
       setCursor("grab");
