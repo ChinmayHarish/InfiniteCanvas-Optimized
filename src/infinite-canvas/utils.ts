@@ -26,14 +26,14 @@ const evictPlaneCache = () => {
 
 export const getChunkUpdateThrottleMs = (isZooming: boolean, zoomSpeed: number): number => {
   if (zoomSpeed > 1.0) {
-    return 200;
+    return 100;
   }
 
   if (isZooming) {
-    return 150;
+    return 80;
   }
 
-  return 64;
+  return 16;
 };
 
 /** Map subscriber count to a card scale using log scaling */

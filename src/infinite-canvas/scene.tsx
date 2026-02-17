@@ -24,7 +24,7 @@ import {
 import styles from "./style.module.css";
 import { renderCardTexture } from "./card-texture";
 import { createOrganicGradientMaterial } from "./organic-gradient";
-import type { ChunkData, InfiniteCanvasProps, CardItem, PlaneData } from "./types";
+import type { ChunkData, InfiniteCanvasProps, CardItem } from "./types";
 import { generateChunkPlanesCached, getCardScale, getChunkUpdateThrottleMs, shouldThrottleUpdate } from "./utils";
 
 const KEYBOARD_MAP = [
@@ -66,6 +66,19 @@ type CameraGridState = {
 // Shared geometry — all cards reuse one PlaneGeometry instance
 const SHARED_PLANE_GEO = new THREE.PlaneGeometry(1, 1);
 
+// ShaderMaterial pool — reuse materials to avoid GPU recompilation
+const materialPool = new Map<number, THREE.ShaderMaterial>();
+function getPooledMaterial(rank: number): THREE.ShaderMaterial {
+  const poolKey = rank % 12; // 12 palettes
+  let mat = materialPool.get(poolKey);
+  if (!mat) {
+    mat = createOrganicGradientMaterial(rank);
+    materialPool.set(poolKey, mat);
+  }
+  // Clone reuses compiled program from pool
+  return mat.clone();
+}
+
 function CardPlane({
   position,
   card,
@@ -86,9 +99,9 @@ function CardPlane({
   const groupRef = React.useRef<THREE.Group>(null);
   const localState = React.useRef({ opacity: 0, frame: 0 });
 
-  // Create the organic gradient shader material (unique per card rank)
+  // Create the organic gradient shader material (pooled to avoid recompilation)
   const gradientMaterial = React.useMemo(
-    () => createOrganicGradientMaterial(card.rank),
+    () => getPooledMaterial(card.rank),
     [card.rank]
   );
 
@@ -143,7 +156,7 @@ function CardPlane({
 
     const target = Math.min(gridFade, depthFade * depthFade);
 
-    state.opacity = target < INVIS_THRESHOLD && state.opacity < INVIS_THRESHOLD ? 0 : lerp(state.opacity, target, 0.18);
+    state.opacity = target < INVIS_THRESHOLD && state.opacity < INVIS_THRESHOLD ? 0 : lerp(state.opacity, target, 0.35);
 
     const isVisible = state.opacity > INVIS_THRESHOLD;
 
@@ -169,31 +182,14 @@ function CardPlane({
     group.scale.copy(displayScale);
   }, [displayScale]);
 
-  const handleClick = React.useCallback(
-    (e: THREE.Event) => {
-      (e as { stopPropagation?: () => void }).stopPropagation?.();
-      window.open(card.url, "_blank", "noopener,noreferrer");
-    },
-    [card.url]
-  );
-
-  const handlePointerOver = React.useCallback(() => {
-    document.body.style.cursor = "pointer";
-  }, []);
-
-  const handlePointerOut = React.useCallback(() => {
-    document.body.style.cursor = "grab";
-  }, []);
-
   return (
     <group ref={groupRef} position={position} scale={displayScale} visible={false}>
       {/* Organic Gradient Background + Text (Single Pass) */}
+      {/* No onClick/onPointerOver/onPointerOut — raycasting disabled for performance */}
       <mesh
         geometry={SHARED_PLANE_GEO}
         material={gradientMaterial}
-        onClick={handleClick}
-        onPointerOver={handlePointerOver}
-        onPointerOut={handlePointerOut}
+        raycast={() => { }}
       />
     </group>
   );
@@ -214,27 +210,11 @@ function Chunk({
   cameraGridRef: React.RefObject<CameraGridState>;
   isTouchDevice: boolean;
 }) {
-  const [planes, setPlanes] = React.useState<PlaneData[] | null>(null);
-
-  React.useEffect(() => {
-    let canceled = false;
-    const run = () => !canceled && setPlanes(generateChunkPlanesCached(cx, cy, cz));
-
-    if (typeof requestIdleCallback !== "undefined") {
-      const id = requestIdleCallback(run, { timeout: 100 });
-
-      return () => {
-        canceled = true;
-        cancelIdleCallback(id);
-      };
-    }
-
-    const id = setTimeout(run, 0);
-    return () => {
-      canceled = true;
-      clearTimeout(id);
-    };
-  }, [cx, cy, cz]);
+  // Synchronous generation — cached data is cheap, idle callback delays cause visible pop-in
+  const planes = React.useMemo(
+    () => generateChunkPlanesCached(cx, cy, cz),
+    [cx, cy, cz]
+  );
 
   if (!planes) {
     return null;
@@ -244,11 +224,7 @@ function Chunk({
     <group>
       {planes.map((plane) => {
         const cardItem = cards[plane.cardIndex % cards.length];
-
-        if (!cardItem) {
-          return null;
-        }
-
+        if (!cardItem) return null;
         return (
           <CardPlane
             key={plane.id}
@@ -265,6 +241,9 @@ function Chunk({
     </group>
   );
 }
+
+// Memoize Chunk so React skips re-render when cx/cy/cz haven't changed
+const MemoChunk = React.memo(Chunk);
 
 type ControllerState = {
   velocity: { x: number; y: number; z: number };
@@ -502,7 +481,7 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
   return (
     <>
       {chunks.map((chunk) => (
-        <Chunk
+        <MemoChunk
           key={chunk.key}
           cx={chunk.cx}
           cy={chunk.cy}
@@ -543,6 +522,7 @@ export function InfiniteCanvasScene({
           flat
           gl={{ antialias: false, powerPreference: "high-performance" }}
           className={styles.canvas}
+
         >
           <color attach="background" args={["#050508"]} />
           <fog attach="fog" args={[fogColor, fogNear, fogFar]} />
