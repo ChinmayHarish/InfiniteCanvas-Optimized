@@ -189,7 +189,6 @@ function CardPlane({
       <mesh
         geometry={SHARED_PLANE_GEO}
         material={gradientMaterial}
-        raycast={() => { }}
         userData={{ url: card.url }}
       />
     </group>
@@ -409,9 +408,13 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
 
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
         // It's a click
+        const rect = gl.domElement.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
         const mouse = new THREE.Vector2(
-          (e.clientX / window.innerWidth) * 2 - 1,
-          -(e.clientY / window.innerHeight) * 2 + 1
+          (x / rect.width) * 2 - 1,
+          -(y / rect.height) * 2 + 1
         );
         const raycaster = new THREE.Raycaster();
         raycaster.setFromCamera(mouse, camera);
