@@ -1,7 +1,7 @@
 import { run } from "~/src/utils";
 
 export const CHUNK_SIZE = 110;
-export const RENDER_DISTANCE = 2;
+export const RENDER_DISTANCE = 1;
 export const CHUNK_FADE_MARGIN = 1;
 export const MAX_VELOCITY = 3.2;
 export const DEPTH_FADE_START = 140;
@@ -12,9 +12,13 @@ export const VELOCITY_LERP = 0.16;
 export const VELOCITY_DECAY = 0.9;
 export const INITIAL_CAMERA_Z = 50;
 
-// Card texture dimensions (pixels for OffscreenCanvas)
-export const CARD_TEX_WIDTH = 768;
-export const CARD_TEX_HEIGHT = 480;
+// Card texture dimensions (pixels for OffscreenCanvas) - text overlay only
+export const MOBILE_TEX_SIZE = 512;
+export const DESKTOP_TEX_SIZE = 1024;
+
+// Default dimensions (will be overridden dynamically in scene.tsx)
+export const CARD_TEX_WIDTH = 1024;
+export const CARD_TEX_HEIGHT = 1024;
 
 // Card plane scale bounds (world units)
 export const MIN_CARD_SCALE = 8;

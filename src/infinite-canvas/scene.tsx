@@ -1,13 +1,11 @@
 import { KeyboardControls, Stats, useKeyboardControls } from "@react-three/drei";
-import { EffectComposer, Bloom, Vignette, Noise } from "@react-three/postprocessing";
+
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as React from "react";
 import * as THREE from "three";
 import { useIsTouchDevice } from "~/src/use-is-touch-device";
 import { clamp, lerp } from "~/src/utils";
 import {
-  CARD_TEX_HEIGHT,
-  CARD_TEX_WIDTH,
   CHUNK_FADE_MARGIN,
   CHUNK_OFFSETS,
   CHUNK_SIZE,
@@ -17,16 +15,17 @@ import {
   INVIS_THRESHOLD,
   KEYBOARD_SPEED,
   MAX_VELOCITY,
+  MOBILE_TEX_SIZE,
+  DESKTOP_TEX_SIZE,
   RENDER_DISTANCE,
   VELOCITY_DECAY,
   VELOCITY_LERP,
 } from "./constants";
 import styles from "./style.module.css";
 import { renderCardTexture } from "./card-texture";
+import { createOrganicGradientMaterial } from "./organic-gradient";
 import type { ChunkData, InfiniteCanvasProps, CardItem, PlaneData } from "./types";
 import { generateChunkPlanesCached, getCardScale, getChunkUpdateThrottleMs, shouldThrottleUpdate } from "./utils";
-
-const PLANE_GEOMETRY = new THREE.PlaneGeometry(1, 1);
 
 const KEYBOARD_MAP = [
   { name: "forward", keys: ["w", "W", "ArrowUp"] },
@@ -64,6 +63,9 @@ type CameraGridState = {
   camZ: number;
 };
 
+// Shared geometry — all cards reuse one PlaneGeometry instance
+const SHARED_PLANE_GEO = new THREE.PlaneGeometry(1, 1);
+
 function CardPlane({
   position,
   card,
@@ -71,6 +73,7 @@ function CardPlane({
   chunkCy,
   chunkCz,
   cameraGridRef,
+  isTouchDevice,
 }: {
   position: THREE.Vector3;
   card: CardItem;
@@ -78,32 +81,43 @@ function CardPlane({
   chunkCy: number;
   chunkCz: number;
   cameraGridRef: React.RefObject<CameraGridState>;
+  isTouchDevice: boolean;
 }) {
-  const meshRef = React.useRef<THREE.Mesh>(null);
-  const materialRef = React.useRef<THREE.MeshBasicMaterial>(null);
+  const groupRef = React.useRef<THREE.Group>(null);
   const localState = React.useRef({ opacity: 0, frame: 0 });
 
-  const texture = React.useMemo(() => renderCardTexture(card), [card]);
+  // Create the organic gradient shader material (unique per card rank)
+  const gradientMaterial = React.useMemo(
+    () => createOrganicGradientMaterial(card.rank),
+    [card.rank]
+  );
+
+  // Text overlay texture — dynamic resolution for mobile optimization
+  const texture = React.useMemo(() => {
+    return renderCardTexture(card, isTouchDevice);
+  }, [card, isTouchDevice]);
 
   // Calculate display scale from card dimensions
   const displayScale = React.useMemo(() => {
     const cardSize = getCardScale(card.subscribers);
-    const aspect = CARD_TEX_WIDTH / CARD_TEX_HEIGHT;
+    const texW = isTouchDevice ? MOBILE_TEX_SIZE : DESKTOP_TEX_SIZE;
+    const texH = isTouchDevice ? MOBILE_TEX_SIZE : DESKTOP_TEX_SIZE;
+    const aspect = texW / texH;
     return new THREE.Vector3(cardSize * aspect, cardSize, 1);
-  }, [card.subscribers]);
+  }, [card.subscribers, isTouchDevice]);
 
-  useFrame(() => {
-    const material = materialRef.current;
-    const mesh = meshRef.current;
+  useFrame((_, delta) => {
+    const group = groupRef.current;
     const state = localState.current;
 
-    if (!material || !mesh) {
+    if (!group) {
       return;
     }
 
     state.frame = (state.frame + 1) & 1;
 
-    if (state.opacity < INVIS_THRESHOLD && !mesh.visible && state.frame === 0) {
+    // Optimization: skip if invisible and fully faded out
+    if (state.opacity < INVIS_THRESHOLD && !group.visible && state.frame === 0) {
       return;
     }
 
@@ -111,11 +125,11 @@ function CardPlane({
     const dist = Math.max(Math.abs(chunkCx - cam.cx), Math.abs(chunkCy - cam.cy), Math.abs(chunkCz - cam.cz));
     const absDepth = Math.abs(position.z - cam.camZ);
 
+    // Hard cull if too far
     if (absDepth > DEPTH_FADE_END + 50) {
       state.opacity = 0;
-      material.opacity = 0;
-      material.depthWrite = false;
-      mesh.visible = false;
+      gradientMaterial.uniforms.uOpacity.value = 0;
+      group.visible = false;
       return;
     }
 
@@ -131,23 +145,29 @@ function CardPlane({
 
     state.opacity = target < INVIS_THRESHOLD && state.opacity < INVIS_THRESHOLD ? 0 : lerp(state.opacity, target, 0.18);
 
-    const isFullyOpaque = state.opacity > 0.99;
-    material.opacity = isFullyOpaque ? 1 : state.opacity;
-    material.depthWrite = isFullyOpaque;
-    mesh.visible = state.opacity > INVIS_THRESHOLD;
+    const isVisible = state.opacity > INVIS_THRESHOLD;
+
+    // Only update uniforms and visibility if state changed or is active
+    if (group.visible !== isVisible) {
+      group.visible = isVisible;
+    }
+
+    if (isVisible) {
+      // Animate the shader
+      gradientMaterial.uniforms.uTime.value += delta;
+      gradientMaterial.uniforms.uOpacity.value = state.opacity;
+      gradientMaterial.uniforms.uTexture.value = texture;
+      // Only enable depthWrite when fully opaque to reduce sorting cost
+      gradientMaterial.depthWrite = state.opacity > 0.99;
+    }
   });
 
-  // Apply scale and texture on mount
+  // Apply scale on mount/update
   React.useEffect(() => {
-    const material = materialRef.current;
-    const mesh = meshRef.current;
-
-    if (!material || !mesh || !texture) return;
-
-    material.map = texture;
-    material.needsUpdate = true;
-    mesh.scale.copy(displayScale);
-  }, [displayScale, texture]);
+    const group = groupRef.current;
+    if (!group) return;
+    group.scale.copy(displayScale);
+  }, [displayScale]);
 
   const handleClick = React.useCallback(
     (e: THREE.Event) => {
@@ -157,23 +177,25 @@ function CardPlane({
     [card.url]
   );
 
+  const handlePointerOver = React.useCallback(() => {
+    document.body.style.cursor = "pointer";
+  }, []);
+
+  const handlePointerOut = React.useCallback(() => {
+    document.body.style.cursor = "grab";
+  }, []);
+
   return (
-    <mesh
-      ref={meshRef}
-      position={position}
-      scale={displayScale}
-      visible={false}
-      geometry={PLANE_GEOMETRY}
-      onPointerUp={handleClick}
-      onPointerOver={() => {
-        document.body.style.cursor = "pointer";
-      }}
-      onPointerOut={() => {
-        document.body.style.cursor = "grab";
-      }}
-    >
-      <meshBasicMaterial ref={materialRef} transparent opacity={0} side={THREE.DoubleSide} />
-    </mesh>
+    <group ref={groupRef} position={position} scale={displayScale} visible={false}>
+      {/* Organic Gradient Background + Text (Single Pass) */}
+      <mesh
+        geometry={SHARED_PLANE_GEO}
+        material={gradientMaterial}
+        onClick={handleClick}
+        onPointerOver={handlePointerOver}
+        onPointerOut={handlePointerOut}
+      />
+    </group>
   );
 }
 
@@ -183,12 +205,14 @@ function Chunk({
   cz,
   cards,
   cameraGridRef,
+  isTouchDevice,
 }: {
   cx: number;
   cy: number;
   cz: number;
   cards: CardItem[];
   cameraGridRef: React.RefObject<CameraGridState>;
+  isTouchDevice: boolean;
 }) {
   const [planes, setPlanes] = React.useState<PlaneData[] | null>(null);
 
@@ -234,6 +258,7 @@ function Chunk({
             chunkCy={cy}
             chunkCz={cz}
             cameraGridRef={cameraGridRef}
+            isTouchDevice={isTouchDevice}
           />
         );
       })}
@@ -255,7 +280,6 @@ type ControllerState = {
   lastChunkKey: string;
   lastChunkUpdate: number;
   pendingChunk: { cx: number; cy: number; cz: number } | null;
-  dragMoved: boolean;
 };
 
 const createInitialState = (camZ: number): ControllerState => ({
@@ -272,99 +296,16 @@ const createInitialState = (camZ: number): ControllerState => ({
   lastChunkKey: "",
   lastChunkUpdate: 0,
   pendingChunk: null,
-  dragMoved: false,
 });
 
-import { useSearch } from "./search-context";
-import { generateChunkPlanes } from "./utils";
-
-// ... (existing helper functions if any)
-
-function SceneController({ cards }: { cards: CardItem[] }) {
+function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchDevice: boolean }) {
   const { camera, gl } = useThree();
-  const isTouchDevice = useIsTouchDevice();
-  const [, getKeys] = useKeyboardControls<keyof KeyboardKeys>();
-  const { targetCard } = useSearch();
+  const [, getKeys] = useKeyboardControls();
 
   const state = React.useRef<ControllerState>(createInitialState(INITIAL_CAMERA_Z));
   const cameraGridRef = React.useRef<CameraGridState>({ cx: 0, cy: 0, cz: 0, camZ: camera.position.z });
 
   const [chunks, setChunks] = React.useState<ChunkData[]>([]);
-
-  // Fly-to Animation Ref
-  const flyTo = React.useRef<{
-    active: boolean;
-    startPos: THREE.Vector3;
-    endPos: THREE.Vector3;
-    startTime: number;
-    duration: number;
-  } | null>(null);
-
-  // --- Search & Fly-To Logic ---
-  React.useEffect(() => {
-    if (!targetCard) return;
-
-    // 1. Find the card in the procedural void
-    // We spirally search chunks starting from current camera position
-    const startCx = cameraGridRef.current.cx;
-    const startCy = cameraGridRef.current.cy;
-    const startCz = cameraGridRef.current.cz;
-
-    let foundPos: THREE.Vector3 | null = null;
-
-    // Search radius (in chunks). 
-    // 3,363 cards / 5 per chunk = ~670 chunks to contain all cards once on average.
-    // A radius of 10 chunks (10x10x10) covers 1000 chunks, enough to find it.
-    const MAX_SEARCH_RADIUS = 12;
-
-    searchLoop:
-    for (let r = 0; r < MAX_SEARCH_RADIUS; r++) {
-      for (let x = -r; x <= r; x++) {
-        for (let y = -r; y <= r; y++) {
-          for (let z = -r; z <= r; z++) {
-            // Only check the surface of the cube to avoid re-checking inner shells
-            if (Math.abs(x) !== r && Math.abs(y) !== r && Math.abs(z) !== r) continue;
-
-            const cx = startCx + x;
-            const cy = startCy + y;
-            const cz = startCz + z;
-
-            const planes = generateChunkPlanes(cx, cy, cz);
-            for (const plane of planes) {
-              // Check if this plane maps to our target card
-              if (cards[plane.cardIndex % cards.length]?.id === targetCard.id) {
-                foundPos = plane.position.clone();
-                // Move camera to look slightly at it (offset z by -20 to be in front)
-                foundPos.z += 30;
-                break searchLoop;
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (foundPos) {
-      // Start Animation
-      flyTo.current = {
-        active: true,
-        startPos: new THREE.Vector3(state.current.basePos.x, state.current.basePos.y, state.current.basePos.z),
-        endPos: foundPos,
-        startTime: performance.now(),
-        duration: 2000, // 2 seconds flight
-      };
-
-      // Reset velocity to stop existing movement
-      state.current.velocity = { x: 0, y: 0, z: 0 };
-      state.current.targetVel = { x: 0, y: 0, z: 0 };
-    } else {
-      console.warn("Card not found in near chunks");
-    }
-
-    // Clear target so we don't re-trigger immediately (or keep it if we want to show 'selected' state)
-    // For now, let's keep it in context but we just triggered the anim.
-
-  }, [targetCard, cards]);
 
   React.useEffect(() => {
     const canvas = gl.domElement;
@@ -377,7 +318,6 @@ function SceneController({ cards }: { cards: CardItem[] }) {
 
     const onMouseDown = (e: MouseEvent) => {
       s.isDragging = true;
-      s.dragMoved = false;
       s.lastMouse = { x: e.clientX, y: e.clientY };
       setCursor("grabbing");
     };
@@ -400,13 +340,8 @@ function SceneController({ cards }: { cards: CardItem[] }) {
       };
 
       if (s.isDragging) {
-        const dx = e.clientX - s.lastMouse.x;
-        const dy = e.clientY - s.lastMouse.y;
-        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
-          s.dragMoved = true;
-        }
-        s.targetVel.x -= dx * 0.025;
-        s.targetVel.y += dy * 0.025;
+        s.targetVel.x -= (e.clientX - s.lastMouse.x) * 0.025;
+        s.targetVel.y += (e.clientY - s.lastMouse.y) * 0.025;
         s.lastMouse = { x: e.clientX, y: e.clientY };
       }
     };
@@ -437,6 +372,7 @@ function SceneController({ cards }: { cards: CardItem[] }) {
         }
       } else if (touches.length === 2 && s.lastTouchDist > 0) {
         const dist = getTouchDistance(touches);
+        // Slightly higher sensitivity for pinch zoom
         s.scrollAccum += (s.lastTouchDist - dist) * 0.006;
         s.lastTouchDist = dist;
       }
@@ -475,7 +411,7 @@ function SceneController({ cards }: { cards: CardItem[] }) {
     const s = state.current;
     const now = performance.now();
 
-    const { forward, backward, left, right, up, down } = getKeys();
+    const { forward, backward, left, right, up, down } = getKeys() as KeyboardKeys;
     if (forward) s.targetVel.z -= KEYBOARD_SPEED;
     if (backward) s.targetVel.z += KEYBOARD_SPEED;
     if (left) s.targetVel.x -= KEYBOARD_SPEED;
@@ -489,7 +425,7 @@ function SceneController({ cards }: { cards: CardItem[] }) {
     const driftLerp = isZooming ? 0.2 : 0.12;
 
     if (s.isDragging) {
-      // Freeze drift during drag - keep it at current value
+      // Freeze drift during drag
     } else if (isTouchDevice) {
       s.drift.x = lerp(s.drift.x, 0, driftLerp);
       s.drift.y = lerp(s.drift.y, 0, driftLerp);
@@ -566,7 +502,15 @@ function SceneController({ cards }: { cards: CardItem[] }) {
   return (
     <>
       {chunks.map((chunk) => (
-        <Chunk key={chunk.key} cx={chunk.cx} cy={chunk.cy} cz={chunk.cz} cards={cards} cameraGridRef={cameraGridRef} />
+        <Chunk
+          key={chunk.key}
+          cx={chunk.cx}
+          cy={chunk.cy}
+          cz={chunk.cz}
+          cards={cards}
+          cameraGridRef={cameraGridRef}
+          isTouchDevice={isTouchDevice}
+        />
       ))}
     </>
   );
@@ -581,7 +525,6 @@ export function InfiniteCanvasScene({
   cameraFar = 500,
   fogNear = 120,
   fogFar = 320,
-  backgroundColor = "#0a0a0f",
   fogColor = "#0a0a0f",
 }: InfiniteCanvasProps) {
   const isTouchDevice = useIsTouchDevice();
@@ -600,16 +543,10 @@ export function InfiniteCanvasScene({
           flat
           gl={{ antialias: false, powerPreference: "high-performance" }}
           className={styles.canvas}
-          raycaster={{ params: { Points: { threshold: 0.5 } } as any }}
         >
-          <color attach="background" args={[backgroundColor]} />
+          <color attach="background" args={["#050508"]} />
           <fog attach="fog" args={[fogColor, fogNear, fogFar]} />
-          <SceneController cards={cards} />
-          <EffectComposer>
-            <Bloom luminanceThreshold={0.15} luminanceSmoothing={0.9} height={300} intensity={0.4} />
-            <Noise opacity={0.03} />
-            <Vignette eskil={false} offset={0.05} darkness={0.9} />
-          </EffectComposer>
+          <SceneController cards={cards} isTouchDevice={isTouchDevice} />
           {showFps && <Stats className={styles.stats} />}
         </Canvas>
 
