@@ -190,6 +190,7 @@ function CardPlane({
         geometry={SHARED_PLANE_GEO}
         material={gradientMaterial}
         raycast={() => { }}
+        userData={{ url: card.url }}
       />
     </group>
   );
@@ -301,9 +302,34 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
       setCursor("grabbing");
     };
 
-    const onMouseUp = () => {
+    const onMouseUp = (e: MouseEvent) => {
       s.isDragging = false;
       setCursor("grab");
+
+      // Manual raycast for click detection (performance optimization vs R3F events)
+      // Check if it was a click (not a drag)
+      const dx = e.clientX - s.lastMouse.x;
+      const dy = e.clientY - s.lastMouse.y;
+      // Use a strict threshold for "click" vs "drag"
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
+        const mouse = new THREE.Vector2(
+          (e.clientX / window.innerWidth) * 2 - 1,
+          -(e.clientY / window.innerHeight) * 2 + 1
+        );
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+
+        // Intersect against chunk meshes
+        if (chunksGroupRef.current) {
+          const intersects = raycaster.intersectObjects(chunksGroupRef.current.children, true);
+          if (intersects.length > 0) {
+            const object = intersects[0].object;
+            if (object.userData && object.userData.url) {
+              window.open(object.userData.url, "_blank");
+            }
+          }
+        }
+      }
     };
 
     const onMouseLeave = () => {
@@ -321,8 +347,10 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
       if (s.isDragging) {
         s.targetVel.x -= (e.clientX - s.lastMouse.x) * 0.025;
         s.targetVel.y += (e.clientY - s.lastMouse.y) * 0.025;
-        s.lastMouse = { x: e.clientX, y: e.clientY };
+        s.lastMouse = { x: e.clientX, y: e.clientY }; // Update lastMouse only during drag
       }
+      // Note: We don't update lastMouse on passive move if we want strict click detection from mouseDown pos
+      // But s.lastMouse is set on MouseDown.
     };
 
     const onWheel = (e: WheelEvent) => {
@@ -365,8 +393,45 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
       setCursor("grab");
     };
 
-    canvas.addEventListener("mousedown", onMouseDown);
-    window.addEventListener("mouseup", onMouseUp);
+    // We need to capture mouseDown position specifically for the click check
+    // The current s.lastMouse is improved to track drag deltas.
+    // Let's introduce a specific 'clickStart' tracking in the closure.
+    let clickStart = { x: 0, y: 0 };
+
+    const onMouseDownWrapper = (e: MouseEvent) => {
+      clickStart = { x: e.clientX, y: e.clientY };
+      onMouseDown(e);
+    };
+
+    const onMouseUpWrapper = (e: MouseEvent) => {
+      const dx = e.clientX - clickStart.x;
+      const dy = e.clientY - clickStart.y;
+
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) {
+        // It's a click
+        const mouse = new THREE.Vector2(
+          (e.clientX / window.innerWidth) * 2 - 1,
+          -(e.clientY / window.innerHeight) * 2 + 1
+        );
+        const raycaster = new THREE.Raycaster();
+        raycaster.setFromCamera(mouse, camera);
+
+        if (chunksGroupRef.current) {
+          const intersects = raycaster.intersectObjects(chunksGroupRef.current.children, true);
+          if (intersects.length > 0) {
+            const object = intersects[0].object;
+            if (object.userData && object.userData.url) {
+              window.open(object.userData.url, "_blank");
+            }
+          }
+        }
+      }
+      onMouseUp(e);
+    };
+
+
+    canvas.addEventListener("mousedown", onMouseDownWrapper);
+    window.addEventListener("mouseup", onMouseUpWrapper);
     window.addEventListener("mousemove", onMouseMove);
     canvas.addEventListener("mouseleave", onMouseLeave);
     canvas.addEventListener("wheel", onWheel, { passive: false });
@@ -375,8 +440,8 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
     canvas.addEventListener("touchend", onTouchEnd, { passive: false });
 
     return () => {
-      canvas.removeEventListener("mousedown", onMouseDown);
-      window.removeEventListener("mouseup", onMouseUp);
+      canvas.removeEventListener("mousedown", onMouseDownWrapper);
+      window.removeEventListener("mouseup", onMouseUpWrapper);
       window.removeEventListener("mousemove", onMouseMove);
       canvas.removeEventListener("mouseleave", onMouseLeave);
       canvas.removeEventListener("wheel", onWheel);
@@ -384,7 +449,7 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
       canvas.removeEventListener("touchmove", onTouchMove);
       canvas.removeEventListener("touchend", onTouchEnd);
     };
-  }, [gl]);
+  }, [gl, camera]); // Added camera dependency
 
   useFrame(() => {
     const s = state.current;
@@ -464,37 +529,29 @@ function SceneController({ cards, isTouchDevice }: { cards: CardItem[]; isTouchD
     }
   });
 
-  React.useEffect(() => {
-    const s = state.current;
-    s.basePos = { x: camera.position.x, y: camera.position.y, z: camera.position.z };
+  // ... (rest of SceneController)
 
-    setChunks(
-      CHUNK_OFFSETS.map((o) => ({
-        key: `${o.dx},${o.dy},${o.dz}`,
-        cx: o.dx,
-        cy: o.dy,
-        cz: o.dz,
-      }))
-    );
-  }, [camera]);
+  // Ref for raycasting
+  const chunksGroupRef = React.useRef<THREE.Group>(null);
+
+  // ... (rest of logic)
 
   return (
-    <>
+    <group ref={chunksGroupRef}>
       {chunks.map((chunk) => (
         <MemoChunk
           key={chunk.key}
           cx={chunk.cx}
           cy={chunk.cy}
           cz={chunk.cz}
-          cards={cards}
+          cards={cards} // CardPlane will need to add userData
           cameraGridRef={cameraGridRef}
           isTouchDevice={isTouchDevice}
         />
       ))}
-    </>
+    </group>
   );
 }
-
 export function InfiniteCanvasScene({
   cards,
   showFps = false,
